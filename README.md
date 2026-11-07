@@ -3,6 +3,7 @@
 This repository provisions AWS infrastructure for **StartupTech's MuchTodo** Golang backend with Terraform, containerizes the API with Docker, and runs it against MongoDB with Docker Compose on a private EC2 instance behind an Application Load Balancer.
 
 - **Application source:** <https://github.com/Innocent9712/much-to-do/tree/feature/backend-only>
+- **Backend code location in the source repo:** `much-to-do/Server/MuchToDo/`
 - **API port:** `8080`  ·  **Health check:** `GET /health`
 
 ---
@@ -13,7 +14,7 @@ This repository provisions AWS infrastructure for **StartupTech's MuchTodo** Gol
 2. [Repository Structure](#repository-structure)
 3. [Prerequisites](#prerequisites)
 4. [Phase 1: Provision Infrastructure with Terraform](#phase-1-provision-infrastructure-with-terraform)
-5. [Phase 2: Build and Run with Docker Locally](#phase-2-build-and-run-with-docker-locally)
+5. [Phase 2: Build and Push the Docker Image](#phase-2-build-and-push-the-docker-image)
 6. [Phase 3: Deploy to the Backend EC2 Instance](#phase-3-deploy-to-the-backend-ec2-instance)
 7. [Verification](#verification)
 8. [Teardown / Cleanup](#teardown--cleanup)
@@ -24,30 +25,7 @@ This repository provisions AWS infrastructure for **StartupTech's MuchTodo** Gol
 
 ## Architecture
 
-```
-                         Internet
-                            │
-                ┌───────────▼───────────┐
-                │  Application Load     │  ALB SG: 80, 443 from 0.0.0.0/0
-                │  Balancer (public)    │
-                └───────────┬───────────┘
-                            │ :8080 (target group, /health)
- VPC 10.0.0.0/16            │
- ┌──────────────────────────┼──────────────────────────────────────┐
- │  Public subnets          │            10.0.1.0/24, 10.0.2.0/24   │
- │  ┌──────────────┐   ┌────┴─────┐                                │
- │  │ Bastion Host │   │   NAT    │◄── Internet Gateway            │
- │  │ (Elastic IP) │   │ Gateway  │                                │
- │  └──────┬───────┘   └────▲─────┘                                │
- │         │ SSH :22        │ outbound only                        │
- │  Private subnets         │            10.0.3.0/24, 10.0.4.0/24   │
- │  ┌──────▼────────────────┴───┐        ┌──────────────────────┐  │
- │  │ Backend Server            │ :27017 │ MongoDB Server       │  │
- │  │ Docker Compose:           ├───────►│ (mongod)             │  │
- │  │  backend + mongodb        │        │                      │  │
- │  └───────────────────────────┘        └──────────────────────┘  │
- └─────────────────────────────────────────────────────────────────┘
-```
+![Architecture diagram](evidence/architecture-diagram.png)
 
 ### Resources created
 
@@ -85,7 +63,7 @@ backend-deployment-assessment/
 ├── docker-compose.yml             # backend + mongodb services
 ├── .dockerignore                  # Excludes .git, .env, docs from the build context
 ├── .env.example                   # Template for application environment variables
-├── evidence/                      # Deployment screenshots
+├── evidence/                      # Architecture diagram and deployment screenshots
 └── README.md
 ```
 
@@ -103,36 +81,10 @@ backend-deployment-assessment/
 | Git | any | `git --version` |
 | SSH client | OpenSSH | `ssh -V` |
 
-### AWS account
+### Accounts
 
 1. An AWS account and an IAM user with permissions for VPC, EC2, ELB and EIP.
-2. Configure the CLI credentials:
-
-   ```bash
-   aws configure
-   ```
-
-   ```bash
-   aws sts get-caller-identity
-   ```
-
-3. Create an EC2 key pair in the region you will deploy to (default `us-east-1`) and store the private key locally:
-
-   ```bash
-   aws ec2 create-key-pair --key-name muchtodo-key --query 'KeyMaterial' --output text --region us-east-1 > ~/.ssh/muchtodo-key.pem
-   ```
-
-   ```bash
-   chmod 400 ~/.ssh/muchtodo-key.pem
-   ```
-
-4. Find your current public IP (used to lock down Bastion SSH access):
-
-   ```bash
-   curl -4 https://checkip.amazonaws.com
-   ```
-
-> **Cost note:** the NAT Gateway, ALB and Elastic IPs are billed hourly. Run the [teardown](#teardown--cleanup) as soon as you are done.
+2. A Docker Hub account with a private repository for the backend image.
 
 ---
 
@@ -141,7 +93,7 @@ backend-deployment-assessment/
 ### 1. Clone this repository
 
 ```bash
-git clone https://github.com/<your-github-username>/backend-deployment-assessment.git
+git clone https://github.com/codingwithIsioma/backend-deployment-assessment.git
 ```
 
 ```bash
@@ -162,8 +114,8 @@ project_name  = "startuptech"
 environment   = "dev"
 instance_type = "t3.micro"
 vpc_cidr      = "10.0.0.0/16"
-my_ip         = "<your-public-ip>/32"   # from checkip.amazonaws.com
-key_pair_name = "muchtodo-key"          # the key pair created above
+my_ip         = "<your-public-ip>/32"
+key_pair_name = "<your-key-pair-name>"
 ```
 
 | Variable | Description | Default |
@@ -178,7 +130,7 @@ key_pair_name = "muchtodo-key"          # the key pair created above
 | `my_ip` | Your IP in CIDR form, allowed to SSH into the Bastion | *(required)* |
 | `key_pair_name` | Existing EC2 key pair name for SSH | `""` |
 
-> `terraform.tfvars` is listed in `.gitignore` — never commit it.
+`terraform.tfvars` is listed in `.gitignore` and is never committed.
 
 ### 3. Initialize, plan and apply
 
@@ -191,38 +143,32 @@ terraform fmt && terraform validate
 ```
 
 ```bash
-terraform plan -out=tfplan
+terraform plan 
 ```
 
 ```bash
-terraform apply tfplan
+terraform apply 
 ```
 
-Terraform finishes with `Apply complete! Resources: N added, 0 changed, 0 destroyed.` followed by the outputs.
+Terraform finishes with `Apply complete! Resources: 36 added, 0 changed, 0 destroyed.` followed by the outputs.
 
-### 4. Save the outputs
+### 4. View the outputs
 
 ```bash
 terraform output
 ```
 
-Export them as shell variables for the next steps:
-
-```bash
-export BASTION_IP=$(terraform output -raw bastion_public_ip)
-export BACKEND_IP=$(terraform output -raw backend_private_ip)
-export ALB_DNS=$(terraform output -raw alb_dns_name)
-```
-
-> The user data scripts run on first boot. Give the instances **3–5 minutes** to finish installing Docker/MongoDB before connecting.
+Note the `bastion_public_ip`, `backend_private_ip` and `alb_dns_name` values; they are used in the steps below.
 
 ---
 
-## Phase 2: Build and Run with Docker Locally
+## Phase 2: Build and Push the Docker Image
 
-The Docker files in this repo are meant to sit at the root of the MuchTodo application source.
+### Why the image is built locally
 
-### 1. Get the application source
+The Go build is too slow on a `t3.micro` instance (1 GB RAM, burstable CPU), so building the image on the Backend EC2 server takes far too long. Instead, the image is **built locally, pushed to my private Docker Hub repository, and pulled down on the Backend EC2 instance**. This was the fastest way to get the application running on the server.
+
+### 1. Get the application source and add the Docker files
 
 From the root of this repository (one level above `terraform/`):
 
@@ -230,12 +176,14 @@ From the root of this repository (one level above `terraform/`):
 git clone -b feature/backend-only https://github.com/Innocent9712/much-to-do.git
 ```
 
+The backend code lives in `much-to-do/Server/MuchToDo/`, so the Docker files from this repository go into that folder:
+
 ```bash
-cp Dockerfile docker-compose.yml .dockerignore .env.example much-to-do/
+cp Dockerfile docker-compose.yml .dockerignore .env.example much-to-do/Server/MuchToDo/
 ```
 
 ```bash
-cd much-to-do
+cd much-to-do/Server/MuchToDo
 ```
 
 ### 2. Create the environment file
@@ -254,10 +202,35 @@ Edit `.env` and change at least `MONGO_ROOT_PASSWORD` and `JWT_SECRET_KEY`. Dock
 | `JWT_SECRET_KEY` / `JWT_EXPIRATION_HOURS` | Auth token signing |
 | `LOG_LEVEL` / `LOG_FORMAT` | Logging configuration |
 
-### 3. Build the image
+### 3. Build the images
+
+I build locally on macOS (Apple Silicon), where Docker builds `arm64` images by default. The Backend EC2 instance (`t3.micro`) runs on `x86_64`, so it needs a `linux/amd64` image, but that image can't be used to run the app locally on my Mac. So I build **two images** and push both to Docker Hub:
+
+| Tag | Platform | Used on |
+| --- | --- | --- |
+| `codewithisioma/muchtodo:v1` | `linux/amd64` | Backend EC2 instance |
+| `codewithisioma/muchtodo:v1-arm64` | `linux/arm64` | Local macOS machine |
+
+Build the `linux/amd64` image for the EC2 instance:
 
 ```bash
-docker build -t codewithisioma/muchtodo:v1 .
+docker build --platform linux/amd64 -t codewithisioma/muchtodo:v1 .
+```
+
+Build the `linux/arm64` image for running locally:
+
+```bash
+docker build --platform linux/arm64 -t codewithisioma/muchtodo:v1-arm64 .
+```
+
+Confirm the architecture of each image:
+
+```bash
+docker image inspect codewithisioma/muchtodo:v1 --format '{{.Os}}/{{.Architecture}}'
+```
+
+```bash
+docker image inspect codewithisioma/muchtodo:v1-arm64 --format '{{.Os}}/{{.Architecture}}'
 ```
 
 The Dockerfile:
@@ -269,19 +242,47 @@ The Dockerfile:
 docker images codewithisioma/muchtodo
 ```
 
-### 4. Start the stack
+### 4. Push both images to Docker Hub
 
 ```bash
-docker compose up -d --build
+docker login
 ```
 
 ```bash
-docker compose ps
+docker push codewithisioma/muchtodo:v1
+```
+
+```bash
+docker push codewithisioma/muchtodo:v1-arm64
+```
+
+### 5. Run and test locally
+
+The `docker-compose.yml` in this repository uses the `v1` tag (the `amd64` image for EC2). To run locally, change the backend `image` in your local copy (`much-to-do/Server/MuchToDo/docker-compose.yml`) to the `arm64` tag:
+
+```yaml
+services:
+  backend:
+    image: codewithisioma/muchtodo:v1-arm64
+```
+
+If the `arm64` image is not already on your machine, pull it when needed:
+
+```bash
+docker pull codewithisioma/muchtodo:v1-arm64
+```
+
+The application source already contains its own compose file next to ours, so always pass `-f docker-compose.yml` to select this one:
+
+```bash
+docker compose -f docker-compose.yml up -d
+```
+
+```bash
+docker compose -f docker-compose.yml ps
 ```
 
 Both `muchtodo-backend` and `mongodb-server` should be `running`, with MongoDB `healthy`. The backend waits for MongoDB's health check (`depends_on: condition: service_healthy`), both services use `restart: unless-stopped`, share the `app-network` bridge network, and MongoDB data persists in the `mongo_data` volume.
-
-### 5. Test locally
 
 ```bash
 curl -i http://localhost:8080/health
@@ -290,13 +291,13 @@ curl -i http://localhost:8080/health
 Expect `HTTP/1.1 200 OK`. View logs if needed:
 
 ```bash
-docker compose logs -f backend
+docker compose -f docker-compose.yml logs -f backend
 ```
 
 Stop the local stack:
 
 ```bash
-docker compose down
+docker compose -f docker-compose.yml down -v
 ```
 
 ---
@@ -305,29 +306,23 @@ docker compose down
 
 The backend server is in a private subnet, so it can only be reached through the Bastion host.
 
-### 1. Load your key into the SSH agent
+### 1. Log in
+
+To log in to the Bastion host:
 
 ```bash
-ssh-add ~/.ssh/muchtodo-key.pem
+ssh -i ~/path/to/your-key.pem ec2-user@<bastion-host-public-ip>
 ```
 
-### 2. SSH to the Backend through the Bastion
+To log in to the Backend server through the Bastion (local → Bastion → Backend):
+
+My EC2 key pair is saved only on my local machine, not on the Bastion host. Instead of copying the private key onto the Bastion, I jump straight from local → Bastion → Backend in one command. `ProxyCommand` opens a tunnel through the Bastion (`-W %h:%p`), and both hops authenticate with the same local key.
 
 ```bash
-ssh -A -J ec2-user@$BASTION_IP ec2-user@$BACKEND_IP
+ssh -i ~/path/to/your-key.pem -o ProxyCommand="ssh -i ~/path/to/your-key.pem -W %h:%p ec2-user@<bastion-host-public-ip>" ec2-user@<backend-private-ip>
 ```
 
-`-J` (ProxyJump) connects local → Bastion → Backend in a single command. Alternatively, do it in two hops:
-
-```bash
-ssh -A -i ~/.ssh/muchtodo-key.pem ec2-user@$BASTION_IP
-```
-
-```bash
-ssh ec2-user@<backend-private-ip>
-```
-
-### 3. Confirm the user data finished
+### 2. Confirm the user data finished
 
 On the Backend server:
 
@@ -335,9 +330,13 @@ On the Backend server:
 docker --version && docker compose version && git --version
 ```
 
-If a command is missing, check the bootstrap log: `sudo tail -n 50 /var/log/cloud-init-output.log`.
+If a command is missing, check the bootstrap log:
 
-### 4. Clone the application and add the Docker files
+```bash
+sudo tail -n 50 /var/log/cloud-init-output.log
+```
+
+### 3. Clone the application and add the Docker files
 
 ```bash
 git clone -b feature/backend-only https://github.com/Innocent9712/much-to-do.git
@@ -348,23 +347,25 @@ git clone https://github.com/<your-github-username>/backend-deployment-assessmen
 ```
 
 ```bash
-cp backend-deployment-assessment/{Dockerfile,docker-compose.yml,.dockerignore,.env.example} much-to-do/
+cp backend-deployment-assessment/{docker-compose.yml,.env.example} much-to-do/Server/MuchToDo/
 ```
 
 ```bash
-cd much-to-do && cp .env.example .env
+cd much-to-do/Server/MuchToDo && cp .env.example .env
 ```
 
 Edit `.env` with real secrets (`nano .env`), as in Phase 2.
 
-### 5. Start the application
+### 4. Start the application
+
+On EC2, the `docker-compose.yml` uses the `codewithisioma/muchtodo:v1` tag, so Docker Compose pulls the `linux/amd64` image from Docker Hub.
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.yml up -d
 ```
 
 ```bash
-docker compose ps
+docker compose -f docker-compose.yml ps
 ```
 
 ```bash
@@ -380,7 +381,7 @@ Within about a minute the ALB health check (`/health`, every 30s, 2 successes) m
 From your local machine:
 
 ```bash
-curl -i http://$ALB_DNS/health
+curl -i http://<alb-dns-name>/health
 ```
 
 Check target health from the CLI:
@@ -398,7 +399,7 @@ The target state should be `healthy`, and the `curl` should return `200 OK` from
 ### 1. Stop the containers (on the Backend server)
 
 ```bash
-docker compose down -v
+docker compose -f docker-compose.yml down -v
 ```
 
 `-v` also removes the `mongo_data` volume. Omit it if you want to keep the data.
@@ -417,30 +418,14 @@ Type `yes` to confirm. Terraform removes every resource it created (ALB, instanc
 
 ### 3. Optional cleanup
 
-Delete the key pair if you no longer need it:
-
-```bash
-aws ec2 delete-key-pair --key-name muchtodo-key --region us-east-1
-```
-
-```bash
-rm -f ~/.ssh/muchtodo-key.pem
-```
-
 Remove local Docker images and volumes:
 
 ```bash
-docker image rm codewithisioma/muchtodo:v1
+docker image rm codewithisioma/muchtodo:v1 codewithisioma/muchtodo:v1-arm64
 ```
 
 ```bash
 docker volume prune
-```
-
-Confirm nothing is left running and billing:
-
-```bash
-aws ec2 describe-instances --filters "Name=tag:Project,Values=startuptech" "Name=instance-state-name,Values=running" --query 'Reservations[].Instances[].InstanceId'
 ```
 
 ---
@@ -449,13 +434,12 @@ aws ec2 describe-instances --filters "Name=tag:Project,Values=startuptech" "Name
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| `Permission denied (publickey)` on Bastion | Wrong key or key not added: run `ssh-add ~/.ssh/muchtodo-key.pem`; check `key_pair_name` matches |
 | SSH to Bastion times out | Your IP changed. Update `my_ip` in `terraform.tfvars` and run `terraform apply` |
 | `docker: command not found` on Backend | User data still running or failed: check `/var/log/cloud-init-output.log` |
 | `permission denied` on Docker socket | Log out and back in (the `ec2-user` was added to the `docker` group), or use `sudo` |
-| ALB returns `502` / `503` | Containers not running or target unhealthy. Run `docker compose ps` and `curl localhost:8080/health` on the Backend |
-| Backend container restarting | Check `docker compose logs backend`; usually wrong MongoDB credentials in `.env` |
-| Build killed / out of memory | `t3.micro` has 1 GB RAM; `backend_setup.sh` adds 2 GB swap. Confirm with `free -h` |
+| `pull access denied` for the image | Run `docker login` on the Backend server; the Docker Hub repository is private |
+| ALB returns `502` / `503` | Containers not running or target unhealthy. Run `docker compose -f docker-compose.yml ps` and `curl localhost:8080/health` on the Backend |
+| Backend container restarting | Check `docker compose -f docker-compose.yml logs backend`; usually wrong MongoDB credentials in `.env` |
 
 ---
 
@@ -465,6 +449,7 @@ aws ec2 describe-instances --filters "Name=tag:Project,Values=startuptech" "Name
 - SSH is allowed only from your IP to the Bastion, and only from the Bastion to the Backend.
 - MongoDB accepts connections only from the Backend security group.
 - Containers run as a non-root user.
+- The backend image is stored in a private Docker Hub repository.
 - `terraform.tfvars` and `.env` are git-ignored; only the `.example` files are committed.
 - The committed `terraform.tfstate` must contain no passwords or secret keys: no secrets are passed to Terraform as variables, so the state holds only resource metadata.
 
