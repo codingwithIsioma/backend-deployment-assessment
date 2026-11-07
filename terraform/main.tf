@@ -31,9 +31,16 @@ data "aws_availability_zones" "available" {
 # 2.0 AMI - Fetch the latest Amazon Linux 2 AMI
 data "aws_ami" "amazon_linux" {
   most_recent = true
+  owners      = ["amazon"]
+
   filter {
     name   = "name"
-    values = ["amzn2-ami-hvm-2.0.*-x86_64-gp2"]
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
@@ -74,7 +81,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "${local.name_prefix}-public-subnet-${count.index}"
+    Name = "${local.name_prefix}-public-subnet-${count.index + 1}"
   }
 }
 # 2.2 Private Subnet - Create two private subnets in two different availablity zones
@@ -86,7 +93,7 @@ resource "aws_subnet" "private" {
   map_public_ip_on_launch = false
 
   tags = {
-    Name = "${local.name_prefix}-private-subnet-${count.index}"
+    Name = "${local.name_prefix}-private-subnet-${count.index + 1}"
   }
 }
 
@@ -111,6 +118,13 @@ resource "aws_eip" "nat" {
 }
 # 4.2 For Bastion Host
 resource "aws_eip" "bastion" {
+  instance   = aws_instance.bastion.id
+  domain     = "vpc"
+  depends_on = [aws_internet_gateway.main]
+
+  tags = {
+    Name = "${local.name_prefix}-bastion-eip"
+  }
 }
 
 # 5.0 NAT GATEWAY
@@ -186,8 +200,8 @@ resource "aws_vpc_security_group_ingress_rule" "backend_allow_http" {
   ip_protocol                  = "tcp"
   security_group_id            = aws_security_group.backend-sg.id
   referenced_security_group_id = aws_security_group.alb-sg.id
-  from_port                    = 80
-  to_port                      = 80
+  from_port                    = 8080
+  to_port                      = 8080
 }
 # 1.0.2 Accept inbound access on port 22 from only Bastion Host
 resource "aws_vpc_security_group_ingress_rule" "backend_allow_ssh" {
@@ -196,6 +210,12 @@ resource "aws_vpc_security_group_ingress_rule" "backend_allow_ssh" {
   referenced_security_group_id = aws_security_group.bastion-sg.id
   from_port                    = 22
   to_port                      = 22
+}
+# 1.0.3 Allow all outbound rules
+resource "aws_vpc_security_group_egress_rule" "backend_allow_all_traffic" {
+  ip_protocol       = "-1"
+  security_group_id = aws_security_group.backend-sg.id
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 # 2.0 BASTION SECURITY GROUP
@@ -274,6 +294,12 @@ resource "aws_vpc_security_group_ingress_rule" "mongodb_allow_ssh" {
   from_port                    = 27017
   to_port                      = 27017
 }
+# 4.0.2 Allow all outbound rules
+resource "aws_vpc_security_group_egress_rule" "mongodb_allow_all_traffic" {
+  ip_protocol       = "-1"
+  security_group_id = aws_security_group.mongodb-sg.id
+  cidr_ipv4         = "0.0.0.0/0"
+}
 
 # ============================================================
 # SECTION: COMPUTE - EC2 INSTANCES
@@ -285,7 +311,7 @@ resource "aws_instance" "bastion" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.public[0].id
   vpc_security_group_ids = [aws_security_group.bastion-sg.id]
-
+  key_name               = var.key_pair_name != "" ? var.key_pair_name : null
 
   tags = {
     Name = "${local.name_prefix}-bastion-host"
@@ -298,9 +324,13 @@ resource "aws_instance" "backend" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.private[0].id
   vpc_security_group_ids = [aws_security_group.backend-sg.id]
+  key_name               = var.key_pair_name != "" ? var.key_pair_name : null
   # Bash script to install Docker and Docker Compose on startup
-  # user_data = ""
+  user_data = file("${path.module}/user_data/backend_setup.sh")
+  user_data_replace_on_change = true
 
+  depends_on = [ aws_nat_gateway.main, aws_route_table_association.private ]
+  
   tags = {
     Name = "${local.name_prefix}-backend-server"
   }
@@ -313,7 +343,8 @@ resource "aws_instance" "mongodb" {
   subnet_id              = aws_subnet.private[1].id
   vpc_security_group_ids = [aws_security_group.mongodb-sg.id]
   # Bash script to install MongoDB on startup
-  # user_data = ""
+  user_data = file("${path.module}/user_data/backend_setup.sh")
+  user_data_replace_on_change = true
 
   tags = {
     Name = "${local.name_prefix}-mongodb-server"
@@ -344,10 +375,20 @@ resource "aws_lb_target_group" "alb_tg" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "instance"
-
   health_check {
-    enabled = true
-    path    = "/health"
+    enabled             = true
+    path                = "/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  tags = {
+    Name = "${local.name_prefix}-alb-target-group"
   }
 }
 

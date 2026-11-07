@@ -5,7 +5,7 @@ variable "aws_region" {
 }
 
 variable "instance_type" {
-  description = "The size/type of the EC2 instance."
+  description = "The size/type of the EC2 instance for the servers."
   type        = string
   default     = "t3.micro"
 }
@@ -46,6 +46,12 @@ variable "private_subnet_cidr_block" {
 }
 
 variable "my_ip" {
-  description = "My personal IP address"
+  description = "Your current public IP address in CIDR notation (e.g. 102.89.23.1/32) — used to restrict Bastion SSH access"
   type        = string
+}
+
+variable "key_pair_name" {
+  description = "Name of the existing EC2 Key Pair for SSH access"
+  type        = string
+  default     = ""
 }
