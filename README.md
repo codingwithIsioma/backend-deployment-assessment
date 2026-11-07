@@ -343,7 +343,7 @@ git clone -b feature/backend-only https://github.com/Innocent9712/much-to-do.git
 ```
 
 ```bash
-git clone https://github.com/<your-github-username>/backend-deployment-assessment.git
+git clone https://github.com/codingwithIsioma/backend-deployment-assessment.git
 ```
 
 ```bash
